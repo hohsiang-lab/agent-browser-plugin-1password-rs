@@ -71,7 +71,7 @@ exit 1
 fn invoke(request: Value, case: &str, allowed: Option<&str>) -> Value {
     let dir = temp_dir();
     let fake = dir.join("op");
-    fs::write(&fake, fake_op()).unwrap();
+    fs::write(&fake, fake_op().replace("$MOCK_CASE", case)).unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_agent-browser-plugin-1password"));
