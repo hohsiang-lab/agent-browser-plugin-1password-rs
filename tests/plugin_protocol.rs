@@ -5,20 +5,30 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_dir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "ab-op-plugin-test-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    fs::create_dir(&path).unwrap();
-    path
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+    for _ in 0..32 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ab-op-plugin-test-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            unique
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("failed to create temporary test directory: {error}"),
+        }
+    }
+    panic!("could not allocate unique temporary test directory");
 }
 
 fn invoke(request: Value, setup: bool) -> Value {
