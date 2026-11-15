@@ -18,10 +18,7 @@ struct Page {
     offset: usize,
 }
 
-fn request_fields<'a>(
-    request: &'a Value,
-    allowed: &[&str],
-) -> Result<&'a Map<String, Value>, ()> {
+fn request_fields<'a>(request: &'a Value, allowed: &[&str]) -> Result<&'a Map<String, Value>, ()> {
     let fields = request.as_object().ok_or(())?;
     if !fields.keys().all(|key| allowed.contains(&key.as_str())) {
         return Err(());
@@ -127,10 +124,7 @@ fn finish(mut rows: Vec<Value>, paging: Page, kind: &str) -> Value {
         let right_title = right.get("name").or_else(|| right.get("title"));
         let key = |title: Option<&Value>, row: &Value| {
             (
-                title
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_lowercase(),
+                title.and_then(Value::as_str).unwrap_or("").to_lowercase(),
                 row.get("id")
                     .and_then(Value::as_str)
                     .unwrap_or("")
