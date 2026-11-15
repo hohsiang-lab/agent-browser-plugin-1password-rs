@@ -1,96 +1,58 @@
 # Agent Browser × 1Password CLI (Rust)
 
-A small **Rust executable plugin** for [`agent-browser`](https://agent-browser.dev/plugins) implementing the official `agent-browser.plugin.v1` **`credential.read`** capability using the 1Password CLI (`op`). The AI agent never receives a generic “read my vault” tool.
+An unofficial open-source Rust [Agent Browser](https://agent-browser.dev/plugins) **credential.read** provider using the 1Password CLI (\`op\`). It follows the **Hermes \`browser_vault\` 1Password login-backend** pattern: discover Login-item metadata, match an exact saved website origin, then read **one** selected Login item on demand.
 
-> Status: starter implementation. Test with mock credentials first; **no real vault, token, or production login has been configured or validated**. This repository is not associated with or endorsed by 1Password or Vercel.
+> Status: tested with mock \`op\` data and CI only. It is not affiliated with 1Password, Agent Browser, or Hermes. **Do not use a personal or production vault until reviewed on your own device.**
 
 ## How it works
 
-```
-Hermes sr-worker (Monster) --SSH/Tailscale--> agent-browser MCP (Mac)
-                                                  |
-                                                  v
-                                       agent-browser auth login
-                                                  |
-                                       credential.resolve (stdio JSON)
-                                                  |
-                                       this Rust executable (Mac)
-                                                  |
-                               op item get ITEM_ID --vault VAULT_ID
-                                                  |
-                                      1Password Service Account
-```
+\`\`\`text
+Agent Browser auth login --credential-provider 1password --url https://example.com/login
+       ↓ credential.resolve (local stdio; password is never sent to the AI)
+Rust provider
+       ├─ validate explicit HTTPS URL and optional local origin allowlist
+       ├─ op item list --categories Login --format json
+       ├─ match exact Origin against the item's saved website URLs
+       ├─ if more than one match: require --item <exact ID or title>
+       ├─ op item get ITEM_ID --vault VAULT_ID --format json
+       ├─ revalidate Login category, Item ID, Vault ID and websites
+       └─ op item get ITEM_ID --vault VAULT_ID --otp (optional TOTP)
+       ↓
+Agent Browser receives username/password/[otp] and fills the page
+\`\`\`
 
-* `plugin.manifest` works without a token.
-* `credential.resolve` selects a **fixed** Vault ID and Item ID based on `profileName`, requires an explicit HTTPS login origin in `request.url`, checks `itemRef`, invokes `op`, verifies the returned Item/Vault/Login/website metadata, then responds with `username`, `password`, and `url`.
-* 1Password Service Account Token goes only into the `op` process **environment**, not its CLI arguments, an Agent Browser config, or a Git repository.
-* In the official protocol, the **plugin response itself contains the login credential**. Agent Browser consumes it locally; do not print or forward raw protocol messages through an AI tool or logging proxy.
-* This version does **not** support OTP, passkeys, or credit cards. It does not auto-submit payment forms.
+The provider exposes no secret-search or item-list tool to the model. The 1Password CLI produces all metadata locally. The plugin returns credential values **only to Agent Browser's local \`credential.resolve\` protocol**, which itself contains the password. Do not expose raw plugin stdout, \`op\`, or \`credential.resolve\` as generic MCP tools.
 
-## Prerequisites (Mac)
+### Why there is no Vault/Item config
 
-- `agent-browser` 0.43.0+ (installed separately)
-- Rust toolchain (for local build), or a trusted prebuilt macOS binary
-- [1Password CLI](https://1password.com/downloads/command-line/) `op` installed on the **Mac running Agent Browser**
-- A **dedicated, read-only** 1Password Service Account authorized to one automation vault containing only the intended test Login Item(s)
-- A Login Item with a configured website URL matching the intended login origin
+Like Hermes' \`OnePasswordLoginBackend\`, this provider uses \`op item list\` to discover the Vault ID, Item ID and saved websites dynamically. You do **not** need a separate \`profiles\` mapping, JSON file, or per-site username/password reference. The 1Password **Service Account permissions** control which Vaults it can enumerate.
 
-**Service account authentication is not a “Vault token”.** `OP_SERVICE_ACCOUNT_TOKEN` grants the service account access to explicitly authorized vaults. Each `op item get` also supplies `--vault`. The token should be provisioned on the Mac, not on Monster. For 1Password Connect Server, use a different implementation (`OP_CONNECT_HOST` and `OP_CONNECT_TOKEN`) after separate compatibility testing.
+A login is eligible only if its saved website origin **exactly** matches the explicitly supplied HTTPS login URL (scheme, host and effective port). If more than one Login item matches, \`--item\` must specify one exact Item ID (also accepts \`op:ITEM_ID\`) or an unambiguous exact title. A missing URL, unknown item, duplicate title, URL mismatch or changed metadata fails closed. For high-risk deployments, also set \`AB_OP_ALLOWED_ORIGINS\` locally.
+
+## Requirements
+
+- Agent Browser with \`credential.read\` plugin support (currently developed against 0.43.0+)
+- A local 1Password CLI (\`op\`) on the **same machine as Agent Browser**
+- Authentication already set up for \`op\`: preferably a narrowly scoped read-only 1Password Service Account through \`OP_SERVICE_ACCOUNT_TOKEN\`, or an existing 1Password CLI session. 1Password Connect credentials (\`OP_CONNECT_HOST\` and \`OP_CONNECT_TOKEN\`) are also recognized.
+- A Login item containing a website URL. The plugin only handles Login items (not credit cards, passkeys or address entries).
+
+\`OP_SERVICE_ACCOUNT_TOKEN\` is **not** a per-Vault token: its Service Account is given permissions to particular Vaults in 1Password. Store the token only on the host running the plugin; never in GitHub or in a prompt. No \`hermes secrets onepassword setup\` is required on the Mac; that setup controls a different Hermes secret-source feature on the machine where Hermes runs.
 
 ## Build
 
-```sh
+\`\`\`sh
 cargo build --release
-install -m 700 target/release/agent-browser-plugin-1password "$HOME/.local/bin/agent-browser-plugin-1password"
-```
+mkdir -p "$HOME/.local/bin"
+install -m 700 target/release/agent-browser-plugin-1password "$HOME/.local/bin/"
+\`\`\`
 
-For macOS paths without `~/.local/bin`, create the directory first. Avoid using a public CI job with real secret values.
+CI also builds a macOS ARM64 binary (\`aarch64-apple-darwin\`). Download only from a workflow run of a reviewed commit, and verify provenance. A CI artifact is not a signed release. Install \`op\` separately.
 
-For a Mac M1 without Rust installed, the GitHub Actions `CI` workflow also builds an `aarch64-apple-darwin` binary and uploads it as a short-lived workflow artifact. Download only from the GitHub Actions run for the reviewed commit, verify the artifact corresponds to that commit, and install the executable locally. The artifact does **not** install the 1Password CLI or configure any service-account token. Avoid treating a CI artifact as a signed release.
+## Connect to Agent Browser
 
-## Create a private local mapping (never commit it)
+Add this plugin entry to the existing \`~/.agent-browser/config.json\` on the Mac (merge; don't overwrite other settings):
 
-```sh
-mkdir -p "$HOME/.config/agent-browser-plugin-1password"
-cp examples/config.example.json "$HOME/.config/agent-browser-plugin-1password/config.json"
-chmod 600 "$HOME/.config/agent-browser-plugin-1password/config.json"
-```
-
-Edit that local file. Set `profiles.<agent-browser-auth-profile>.vault` to the real **Vault ID**, `item` to the exact **Item ID**, and `login_url` to the expected **HTTPS login URL**. `item_ref` is an optional, non-secret alias for CLI `--item`; it never overrides the fixed ID. The item must have a website URL with the same origin and must be a `LOGIN` item.
-
-```json
-{
-  "profiles": {
-    "staging-example": {
-      "vault": "YOUR_DEDICATED_VAULT_ID",
-      "item": "YOUR_LOGIN_ITEM_ID",
-      "item_ref": "Staging Example",
-      "login_url": "https://example.com/login"
-    }
-  },
-  "keychain": {
-    "service": "agent-browser-1password",
-    "account": "service-account"
-  }
-}
-```
-
-Only the `profiles` mapping is mandatory; the optional `keychain` block enables macOS Keychain fallback described below.
-
-## Service Account Token without placing it on Monster
-
-Choose **one** local Mac authorization method:
-
-1. **Recommended for a macOS SSH-hosted plugin:** store the Service Account Token in the logged-in Mac user's **login Keychain** as a Generic Password entry. Configure its *service* and *account* in the mapping; this plugin uses `/usr/bin/security find-generic-password -s SERVICE -a ACCOUNT -w` to retrieve it locally. Provision through trusted macOS Keychain Access, not through an AI request or command containing the secret. A locked Keychain or access-control prompt may block noninteractive SSH; confirm separately before turning on unattended jobs.
-2. **For interactive/local testing only:** supply `OP_SERVICE_ACCOUNT_TOKEN` through a trusted local secret manager in the plugin process environment. Never save it in shell history, plugin args, config JSON, process command lines, or GitHub Actions secrets for a public fork.
-
-`AB_OP_BINARY` can point to the Mac's `op` binary, e.g. `/opt/homebrew/bin/op` if installed; `AB_OP_CONFIG` overrides the default config path. The token is passed as an environment variable **only to the child `op` process**. No `op signin` or account-wide enumeration is performed.
-
-## Register the Rust binary with Agent Browser
-
-Because the current upstream `plugin add owner/repo` installer uses **`npx`**, it cannot install a standalone Rust repository directly. **Register the executable manually** in `~/.agent-browser/config.json` (merge with your existing settings; do not replace the entire file):
-
-```json
+\`\`\`json
 {
   "plugins": [
     {
@@ -101,54 +63,82 @@ Because the current upstream `plugin add owner/repo` installer uses **`npx`**, i
     }
   ]
 }
-```
+\`\`\`
 
-Test manifest and discovery (does not read secrets):
+The upstream \`agent-browser plugin add owner/repo\` command uses npm/\`npx\`, so a pure Rust repository must be registered manually or bundled with a future installer.
 
-```sh
+The manifest does **not** require 1Password credentials:
+
+\`\`\`sh
 printf '%s\n' '{"protocol":"agent-browser.plugin.v1","type":"plugin.manifest","capability":"plugin.manifest","request":{}}' | "$HOME/.local/bin/agent-browser-plugin-1password"
 agent-browser plugin list
-agent-browser plugin show 1password
-```
+\`\`\`
 
-Run from a trusted local Mac terminal once token permissions and profile mapping are configured:
+For a Login item saved for \`https://example.com\`:
 
-```sh
-agent-browser auth login staging-example \
+\`\`\`sh
+agent-browser auth login example \
   --credential-provider 1password \
-  --item "Staging Example" \
   --url https://example.com/login
-```
+\`\`\`
 
-The login request uses a profile name, fixed alias, and **explicit expected login URL**; no token or password is supplied to the AI agent or process command arguments. The provider **fails closed when the request does not include `url`**, including when a caller relies only on a stored auth profile. For an existing browser login page, Agent Browser supports `--no-navigate --url https://example.com/login`, which checks the active page's origin. The plugin compares the URL's origin (scheme/host/effective port), rather than a permissive substring match.
+For multiple accounts at that origin, select the exact item ID or an unambiguous title:
 
-## Hermes MCP nuance
+\`\`\`sh
+agent-browser auth login example \
+  --credential-provider 1password \
+  --item "My Testing Account" \
+  --url https://example.com/login
+\`\`\`
 
-Existing `sr-worker` starts Agent Browser via Tailscale SSH and has verified `open`/`get_title`. The upstream **MCP `agent_browser_auth_login` arguments currently do not expose the CLI `--credential-provider` and `--item` switches**. This Rust plugin alone does not add an MCP login tool. To make Hermes perform automated vault-backed login, first add those arguments upstream (or create a narrowly scoped local wrapper that does not expose `op` itself), then include the safe tool in `sr-worker`'s MCP allowlist.
+**There is no interactive account picker in \`credential.read\`.** The provider deliberately refuses ambiguous matches rather than guessing. Use your trusted local 1Password CLI/UI to determine the Item ID; do not paste Vault listings or secrets into chat.
 
-Do **not** give Hermes an unrestricted `op` shell tool or generic plugin runner. The fixed mapping, **explicit request origin**, approved item website, read-only vault, and disabled parallel browser calls should remain in place.
+### Optional local policy
 
-## Security properties and limitations
+Set \`AB_OP_ALLOWED_ORIGINS\` on the Mac plugin's environment to a comma-separated list of **exact HTTPS origins** (no paths):
 
-- No arbitrary vault/item discovery. No 1Password CLI interactive sign-in. No non-HTTPS origins. Item ID, Vault ID and Login category must match the static configuration; the 1Password item itself must contain a matching website origin.
-- Config file is owner-readable only (`chmod 600` on Unix). Errors are generic and never echo 1Password CLI output, secrets, or CLI arguments. The plugin enforces bounded output and wall-clock timeouts for `op` and macOS Keychain commands.
-- No OTP retrieval, payment authorization, or card-number handling.
-- The Rust child `op` process receives the Service Account Token in its environment; privileged processes on the Mac may still inspect it. Restrict Mac shell/SSH access and run under a dedicated OS user if possible.
-- Never run `agent-browser plugin run` to print credential responses. `credential.read` is designed for `auth login` only.
-- Browser pages are untrusted; restrict allowed domains, and keep screenshot, DOM-value reading, network dumps, and JS evaluation away from the login step.
-- macOS Keychain authorization under SSH must be tested independently. Keychain fallback is disabled if no `keychain` block is provided.
-- Service Account rate limits, expiry, scoped vault permissions, and macOS sleep/network availability must be accounted for.
+\`\`\`sh
+export AB_OP_ALLOWED_ORIGINS="https://example.com,https://staging.example.org"
+\`\`\`
+
+When unset, any Login URL allowed by the connected 1Password account is eligible, subject to exact origin matching. A dedicated automation Vault/Service Account is strongly recommended. An explicitly empty or malformed allowlist is rejected. Use \`AB_OP_BINARY\` if \`op\` isn't on the process \`PATH\`.
+
+### Authentication modes
+
+The plugin invokes the local \`op\` command with a minimal subprocess environment. It chooses, in order: \`OP_SERVICE_ACCOUNT_TOKEN\` (scoped Service Account), paired \`OP_CONNECT_HOST\`/\`OP_CONNECT_TOKEN\`, then existing \`OP_SESSION\`/\`OP_SESSION_*\` plus \`OP_ACCOUNT\`. It can use \`op\`'s normal local CLI sign-in state. **It does not ask the AI for a password, execute \`op signin\`, store tokens, or read macOS Keychain itself.**
+
+The Agent Browser upstream protocol currently limits the entire provider call to **15 seconds**, so this plugin budgets 5 seconds to list items, 5 seconds to fetch a selected item and 2 seconds to attempt TOTP. Long network/locked-session operations may fail cleanly; don't increase the timeouts beyond the upstream limit without changing Agent Browser as well.
+
+### TOTP
+
+The upstream \`ResolvedCredential\` schema includes an optional \`otp\` field. If a Login item supports \`op item get --otp\`, this plugin includes a validated 6–10-digit code in its local response. If there is no authenticator field or a TOTP fetch fails, login credentials are still returned without \`otp\`.
+
+**This is not a guarantee that Agent Browser will complete a separate or delayed 2FA page automatically**. That requires a real browser E2E test and possibly upstream work. OTP is never printed to the AI.
+
+## Hermes \`sr-worker\` on Monster
+
+Hermes currently reaches the Mac's Agent Browser MCP over Tailscale SSH. That transport can remain unchanged. **However, the currently exposed \`agent_browser_auth_login\` MCP tool does not pass through the CLI \`--credential-provider\`, \`--item\` and \`--url\` options.** This provider alone does not enable Hermes to call it. Extend those upstream MCP parameters or build a narrowly scoped audited wrapper before enabling any real login. Don't give Hermes arbitrary access to the \`op\` CLI.
+
+Hermes' native \`browser_vault\` works with browsers it owns; it does not automatically own a remote Agent Browser MCP session. This Rust project is for Agent Browser's independent credential plugin interface.
+
+## Security boundaries
+
+- Never place a token, password, OTP, Vault listing or other 1Password output in GitHub, CI logs, MCP tool results, shell arguments or chatbot messages.
+- \`op item list\` metadata stays local. Only an unambiguous, exact-origin Login item can be fetched. Full Item ID/Vault ID/category/origin are **rechecked after resolution**, guarding changed metadata.
+- Commands use no shell, bounded stdout, quiet stderr and subprocess timeouts. Service Account privileges should be read-only and restricted to a dedicated test Vault.
+- Password and optional OTP are returned in local plugin protocol JSON, as required by Agent Browser. Pages and JavaScript running at an approved origin may still read credentials entered there. Treat browser sessions as sensitive.
+- The optional \`AB_OP_ALLOWED_ORIGINS\` setting adds a host-local restriction but cannot replace a least-privilege Service Account.
+- This plugin intentionally does not offer credit card data or automatically submit payments.
 
 ## Tests
 
-```sh
+\`\`\`sh
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-```
+cargo build --release
+\`\`\`
 
-Tests use fake in-memory login data and a local fake `op` shell script only, **never** a real service-account token or Vault. The plugin protocol fixture proves manifest, approved credential resolution, denied cross-origin, and denied arbitrary Item IDs.
+The integration tests use a local fake \`op\` script and **fake values only**; CI needs no real Vault, Token or browser.
 
-## License
-
-MIT. Not an official 1Password or Agent Browser plugin.
+MIT licensed. This repository is not an official 1Password or Agent Browser integration.

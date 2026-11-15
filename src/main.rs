@@ -1,13 +1,13 @@
-//! Agent Browser credential.read plugin for the 1Password CLI.
-//! Only locally allowlisted profile -> vault/item/origin mappings can resolve credentials.
+//! Agent Browser credential.read provider backed by 1Password CLI ("op").
+//!
+//! Like Hermes browser_vault: list Login metadata first, bind the request to
+//! an exact saved website origin, then resolve one item's credentials on demand.
+//! No vault/item mapping or 1Password token is stored by this plugin.
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::env;
-use std::fs;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -15,11 +15,12 @@ use std::time::Duration;
 use url::Url;
 
 const PROTOCOL: &str = "agent-browser.plugin.v1";
-const MAX_INPUT_BYTES: u64 = 65_536;
-const MAX_OP_OUTPUT_BYTES: usize = 1_048_576;
-const OP_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(target_os = "macos")]
-const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_REQUEST: u64 = 65_536;
+const MAX_OP_OUTPUT: usize = 1_048_576;
+// Agent Browser currently gives credential plugins 15 seconds in total.
+const LIST_TIMEOUT: Duration = Duration::from_secs(5);
+const ITEM_TIMEOUT: Duration = Duration::from_secs(5);
+const OTP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize)]
 struct Envelope {
@@ -32,28 +33,6 @@ struct Envelope {
 }
 
 #[derive(Deserialize)]
-struct Config {
-    profiles: HashMap<String, Profile>,
-    #[serde(default)]
-    keychain: Option<Keychain>,
-}
-
-#[derive(Deserialize)]
-struct Profile {
-    vault: String,
-    item: String,
-    #[serde(default)]
-    item_ref: Option<String>,
-    login_url: String,
-}
-
-#[derive(Deserialize)]
-struct Keychain {
-    service: String,
-    account: String,
-}
-
-#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ResolveRequest {
     profile_name: String,
@@ -63,42 +42,41 @@ struct ResolveRequest {
     url: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
-struct Login {
-    username: String,
-    password: String,
+#[derive(Debug, Clone)]
+struct ItemMeta {
+    id: String,
+    vault_id: String,
+    title: String,
 }
 
 fn main() {
-    // Never log raw requests, secrets, CLI output, or tokens.
-    let response = match run() {
-        Ok(value) => value,
-        Err(_) => json!({
+    // stdout is exclusively the protocol response; never print raw op output.
+    let response = execute().unwrap_or_else(|_| {
+        json!({
             "protocol": PROTOCOL,
             "success": false,
             "error": "credential unavailable or request not authorized"
-        }),
-    };
-    let mut stdout = io::stdout().lock();
-    if serde_json::to_writer(&mut stdout, &response).is_ok() {
-        let _ = stdout.write_all(b"\n");
+        })
+    });
+    let mut out = io::stdout().lock();
+    if serde_json::to_writer(&mut out, &response).is_ok() {
+        let _ = out.write_all(b"\n");
     }
 }
 
-fn run() -> Result<Value, ()> {
+fn execute() -> Result<Value, ()> {
     let mut input = Vec::new();
     io::stdin()
-        .take(MAX_INPUT_BYTES + 1)
+        .take(MAX_REQUEST + 1)
         .read_to_end(&mut input)
         .map_err(|_| ())?;
-    if input.len() as u64 > MAX_INPUT_BYTES {
+    if input.len() as u64 > MAX_REQUEST {
         return Err(());
     }
     let envelope: Envelope = serde_json::from_slice(&input).map_err(|_| ())?;
     if envelope.protocol != PROTOCOL {
         return Err(());
     }
-
     if envelope.request_type == "plugin.manifest" && envelope.capability == "plugin.manifest" {
         return Ok(json!({
             "protocol": PROTOCOL,
@@ -106,65 +84,62 @@ fn run() -> Result<Value, ()> {
             "manifest": {
                 "name": "1password",
                 "capabilities": ["credential.read"],
-                "description": "Restricted 1Password CLI login credentials (Rust)"
+                "description": "1Password CLI logins selected by exact browser origin"
             }
         }));
     }
-
     if envelope.request_type != "credential.resolve" || envelope.capability != "credential.read" {
         return Err(());
     }
     let request: ResolveRequest = serde_json::from_value(envelope.request).map_err(|_| ())?;
-    let config = read_config()?;
-    let profile = config.profiles.get(&request.profile_name).ok_or(())?;
-    authorize(profile, &request)?;
+    if request.profile_name.trim().is_empty() || request.profile_name.len() > 128 {
+        return Err(());
+    }
+    let login_url = request.url.as_deref().ok_or(())?;
+    let required_origin = https_origin(login_url)?;
+    ensure_allowed_origin(&required_origin)?;
 
-    let token = acquire_service_token(config.keychain.as_ref())?;
-    let op_json = run_op(profile, &token)?;
-    let login = parse_login(&op_json, profile)?;
+    // Listing is metadata-only, not exposed to the model. All matches are
+    // checked against the browser's requested origin *before* op item get.
+    let list_json = op_json(
+        &["item", "list", "--categories", "Login", "--format", "json"],
+        LIST_TIMEOUT,
+    )?;
+    let matches = matching_logins(&list_json, &required_origin)?;
+    let item = select_login(&matches, request.item_ref.as_deref())?;
+
+    let item_json = op_json(
+        &[
+            "item",
+            "get",
+            &item.id,
+            "--vault",
+            &item.vault_id,
+            "--format",
+            "json",
+        ],
+        ITEM_TIMEOUT,
+    )?;
+    let (username, password) = verified_login(&item_json, item, &required_origin)?;
+    let mut credential = json!({
+        "username": username,
+        "password": password,
+        "url": login_url
+    });
+
+    // The upstream ResolvedCredential protocol accepts an optional "otp".
+    // This does not guarantee every multi-page 2FA UI will auto-fill it.
+    if let Some(otp) = read_otp(item) {
+        credential["otp"] = json!(otp);
+    }
     Ok(json!({
         "protocol": PROTOCOL,
         "success": true,
-        "credential": {
-            "username": login.username,
-            "password": login.password,
-            "url": profile.login_url
-        }
+        "credential": credential
     }))
 }
 
-fn default_config_path() -> Result<PathBuf, ()> {
-    let home = env::var_os("HOME").ok_or(())?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("agent-browser-plugin-1password")
-        .join("config.json"))
-}
-
-fn read_config() -> Result<Config, ()> {
-    let path = match env::var_os("AB_OP_CONFIG") {
-        Some(value) => PathBuf::from(value),
-        None => default_config_path()?,
-    };
-    let meta = fs::metadata(&path).map_err(|_| ())?;
-    if !meta.is_file() {
-        return Err(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o077 != 0 {
-            return Err(()); // owner-only config
-        }
-    }
-    let bytes = fs::read(path).map_err(|_| ())?;
-    if bytes.len() > MAX_INPUT_BYTES as usize {
-        return Err(());
-    }
-    serde_json::from_slice(&bytes).map_err(|_| ())
-}
-
-fn origin(url: &str) -> Result<String, ()> {
+fn https_origin(url: &str) -> Result<String, ()> {
     let parsed = Url::parse(url).map_err(|_| ())?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()
@@ -176,140 +151,125 @@ fn origin(url: &str) -> Result<String, ()> {
     Ok(parsed.origin().ascii_serialization())
 }
 
-fn authorize(profile: &Profile, request: &ResolveRequest) -> Result<(), ()> {
-    if profile.vault.trim().is_empty() || profile.item.trim().is_empty() {
-        return Err(());
-    }
-    let approved_origin = origin(&profile.login_url)?;
-    // Fail closed when the caller does not provide its intended login origin.
-    // A profile name alone must not authorize secret retrieval.
-    let requested_url = request.url.as_deref().ok_or(())?;
-    if origin(requested_url)? != approved_origin {
-        return Err(());
-    }
-    if let Some(ref item_ref) = request.item_ref {
-        if item_ref != &profile.item && Some(item_ref) != profile.item_ref.as_ref() {
+fn ensure_allowed_origin(requested_origin: &str) -> Result<(), ()> {
+    // Optional defense in depth for a service account with access to more
+    // than one website. An explicitly empty list fails closed.
+    if let Some(raw) = env::var_os("AB_OP_ALLOWED_ORIGINS") {
+        let raw = raw.to_str().ok_or(())?;
+        let values: Vec<_> = raw.split(',').map(str::trim).collect();
+        if values.is_empty() || values.iter().any(|v| v.is_empty()) {
+            return Err(());
+        }
+        let mut permitted = false;
+        for value in values {
+            let allowed = https_origin(value)?;
+            // Require the allowlist to contain only origins, not arbitrary paths.
+            if value != allowed {
+                return Err(());
+            }
+            if allowed == requested_origin {
+                permitted = true;
+            }
+        }
+        if !permitted {
             return Err(());
         }
     }
     Ok(())
 }
 
-/// Run a local credential backend without shell expansion, with a strict
-/// output cap and wall-clock timeout. Never expose subprocess stderr.
-fn run_bounded(mut command: Command, max_bytes: usize, timeout: Duration) -> Result<Vec<u8>, ()> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|_| ())?;
-    let reader = child.stdout.take().ok_or(())?;
-    let (tx, rx) = mpsc::sync_channel(1);
-    let reader_thread = thread::spawn(move || {
-        let mut output = Vec::new();
-        let answer = reader
-            .take(max_bytes as u64 + 1)
-            .read_to_end(&mut output)
-            .map_err(|_| ())
-            .and({
-                if output.len() > max_bytes {
-                    Err(())
-                } else {
-                    Ok(output)
-                }
-            });
-        let _ = tx.send(answer);
-    });
-    let received = rx.recv_timeout(timeout);
-    if !matches!(received, Ok(Ok(_))) {
-        let _ = child.kill();
+fn matching_logins(list: &Value, required_origin: &str) -> Result<Vec<ItemMeta>, ()> {
+    let items = list.as_array().ok_or(())?;
+    let mut matches = Vec::new();
+    for entry in items {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(vault_id) = entry
+            .get("vault")
+            .and_then(|v| v.get("id"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if id.is_empty() || vault_id.is_empty() {
+            continue;
+        }
+        if !contains_origin(entry, required_origin) {
+            continue;
+        }
+        matches.push(ItemMeta {
+            id: id.to_owned(),
+            vault_id: vault_id.to_owned(),
+            title: entry
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        });
     }
-    let status = child.wait().map_err(|_| ())?;
-    let _ = reader_thread.join();
-    if !status.success() {
+    Ok(matches)
+}
+
+fn contains_origin(item: &Value, required_origin: &str) -> bool {
+    item.get("urls")
+        .and_then(Value::as_array)
+        .is_some_and(|urls| {
+            urls.iter()
+                .filter_map(|u| u.get("href").and_then(Value::as_str))
+                .any(|url| https_origin(url).ok().as_deref() == Some(required_origin))
+        })
+}
+
+fn select_login<'a>(matches: &'a [ItemMeta], item_ref: Option<&str>) -> Result<&'a ItemMeta, ()> {
+    let filtered: Vec<&ItemMeta> = match item_ref {
+        None => matches.iter().collect(),
+        Some(reference) => {
+            if reference.trim().is_empty() {
+                return Err(());
+            }
+            let id = reference.strip_prefix("op:").unwrap_or(reference);
+            matches
+                .iter()
+                .filter(|m| m.id == id || m.title == reference)
+                .collect()
+        }
+    };
+    // Never choose the first account when a site has multiple matches.
+    if filtered.len() != 1 {
         return Err(());
     }
-    received.map_err(|_| ())?
+    Ok(filtered[0])
 }
 
-/// Token never appears in argv/config/errors.
-fn acquire_service_token(keychain: Option<&Keychain>) -> Result<String, ()> {
-    if let Ok(token) = env::var("OP_SERVICE_ACCOUNT_TOKEN") {
-        if !token.trim().is_empty() {
-            return Ok(token);
-        }
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(kc) = keychain {
-        if kc.service.is_empty() || kc.account.is_empty() {
-            return Err(());
-        }
-        let mut command = Command::new("/usr/bin/security");
-        command.args([
-            "find-generic-password",
-            "-s",
-            &kc.service,
-            "-a",
-            &kc.account,
-            "-w",
-        ]);
-        let output = run_bounded(command, 8192, KEYCHAIN_TIMEOUT)?;
-        let token = String::from_utf8(output).map_err(|_| ())?;
-        let token = token.trim().to_owned();
-        if !token.is_empty() {
-            return Ok(token);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    if let Some(kc) = keychain {
-        let _ = (&kc.service, &kc.account);
-    }
-    Err(())
-}
-
-fn run_op(profile: &Profile, token: &str) -> Result<Value, ()> {
-    let op_binary = env::var("AB_OP_BINARY").unwrap_or_else(|_| "op".to_owned());
-    if op_binary.is_empty() {
+fn verified_login(
+    item: &Value,
+    metadata: &ItemMeta,
+    required_origin: &str,
+) -> Result<(String, String), ()> {
+    if item.get("id").and_then(Value::as_str) != Some(metadata.id.as_str())
+        || item
+            .get("vault")
+            .and_then(|v| v.get("id"))
+            .and_then(Value::as_str)
+            != Some(metadata.vault_id.as_str())
+        || !item
+            .get("category")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.eq_ignore_ascii_case("LOGIN"))
+        || !contains_origin(item, required_origin)
+    {
         return Err(());
     }
-    let mut command = Command::new(op_binary);
-    command.args([
-        "item",
-        "get",
-        &profile.item,
-        "--vault",
-        &profile.vault,
-        "--format",
-        "json",
-    ]);
-
-    // Do not propagate unrelated secrets from MCP host environment.
-    command.env_clear();
-    for name in [
-        "PATH",
-        "HOME",
-        "TMPDIR",
-        "LANG",
-        "SSL_CERT_FILE",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "NO_PROXY",
-    ] {
-        if let Some(value) = env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    command
-        .env("OP_SERVICE_ACCOUNT_TOKEN", token)
-        .env("OP_LOAD_DESKTOP_APP_SETTINGS", "false")
-        .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false");
-    let output = run_bounded(command, MAX_OP_OUTPUT_BYTES, OP_TIMEOUT)?;
-    serde_json::from_slice(&output).map_err(|_| ())
+    Ok((
+        field(item, "USERNAME", "username")?,
+        field(item, "PASSWORD", "password")?,
+    ))
 }
 
-fn field_value(item: &Value, purpose: &str, label: &str) -> Result<String, ()> {
+fn field(item: &Value, purpose: &str, label: &str) -> Result<String, ()> {
     let fields = item.get("fields").and_then(Value::as_array).ok_or(())?;
-    let by_purpose: Vec<&str> = fields
+    let preferred: Vec<&str> = fields
         .iter()
         .filter(|f| {
             f.get("purpose")
@@ -318,168 +278,208 @@ fn field_value(item: &Value, purpose: &str, label: &str) -> Result<String, ()> {
         })
         .filter_map(|f| f.get("value").and_then(Value::as_str))
         .collect();
-    let matches = if by_purpose.is_empty() {
+    let candidates = if preferred.is_empty() {
         fields
             .iter()
             .filter(|f| {
-                f.get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| s.eq_ignore_ascii_case(label))
-                    || f.get("label")
+                ["id", "label"].iter().any(|key| {
+                    f.get(*key)
                         .and_then(Value::as_str)
-                        .is_some_and(|s| s.eq_ignore_ascii_case(label))
+                        .is_some_and(|v| v.eq_ignore_ascii_case(label))
+                })
             })
             .filter_map(|f| f.get("value").and_then(Value::as_str))
             .collect::<Vec<_>>()
     } else {
-        by_purpose
+        preferred
     };
-    if matches.len() != 1 || matches[0].is_empty() || matches[0].len() > 16_384 {
+    if candidates.len() != 1 || candidates[0].is_empty() || candidates[0].len() > 16_384 {
         return Err(());
     }
-    Ok(matches[0].to_owned())
+    Ok(candidates[0].to_owned())
 }
 
-fn parse_login(item: &Value, profile: &Profile) -> Result<Login, ()> {
-    if item.get("id").and_then(Value::as_str) != Some(profile.item.as_str()) {
+fn read_otp(item: &ItemMeta) -> Option<String> {
+    let output = op_output(
+        &["item", "get", &item.id, "--vault", &item.vault_id, "--otp"],
+        OTP_TIMEOUT,
+        128,
+    )
+    .ok()?;
+    let value = String::from_utf8(output).ok()?;
+    let code = value.trim();
+    (code.len() >= 6 && code.len() <= 10 && code.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| code.to_owned())
+}
+
+fn op_json(args: &[&str], timeout: Duration) -> Result<Value, ()> {
+    let output = op_output(args, timeout, MAX_OP_OUTPUT)?;
+    serde_json::from_slice(&output).map_err(|_| ())
+}
+
+fn op_output(args: &[&str], timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, ()> {
+    let binary = env::var_os("AB_OP_BINARY").unwrap_or_else(|| "op".into());
+    if binary.is_empty() {
         return Err(());
     }
-    let vault = item.get("vault").ok_or(())?;
-    if vault.get("id").and_then(Value::as_str) != Some(profile.vault.as_str())
-        && vault.get("name").and_then(Value::as_str) != Some(profile.vault.as_str())
-    {
+    let mut command = Command::new(binary);
+    command.args(args);
+    configure_op_environment(&mut command);
+    run_bounded(command, max_bytes, timeout)
+}
+
+fn configure_op_environment(command: &mut Command) {
+    command.env_clear();
+    for key in [
+        "PATH",
+        "HOME",
+        "USER",
+        "TMPDIR",
+        "TMP",
+        "LANG",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "OP_CONFIG_DIR",
+        "OP_LOAD_DESKTOP_APP_SETTINGS",
+        "OP_BIOMETRIC_UNLOCK_ENABLED",
+    ] {
+        if let Some(value) = env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command.env("NO_COLOR", "1");
+    // Prefer a scoped Service Account Token, then a correctly paired Connect
+    // credential, then an existing CLI session. Never combine auth modes.
+    if let Some(token) = env::var_os("OP_SERVICE_ACCOUNT_TOKEN").filter(|v| !v.is_empty()) {
+        command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
+    } else if let (Some(host), Some(token)) = (
+        env::var_os("OP_CONNECT_HOST").filter(|v| !v.is_empty()),
+        env::var_os("OP_CONNECT_TOKEN").filter(|v| !v.is_empty()),
+    ) {
+        command.env("OP_CONNECT_HOST", host);
+        command.env("OP_CONNECT_TOKEN", token);
+    } else {
+        if let Some(account) = env::var_os("OP_ACCOUNT") {
+            command.env("OP_ACCOUNT", account);
+        }
+        for (key, value) in env::vars_os() {
+            if let Some(name) = key.to_str() {
+                if name == "OP_SESSION" || name.starts_with("OP_SESSION_") {
+                    command.env(key, value);
+                }
+            }
+        }
+    }
+}
+
+/// Run op directly (no shell); suppress stderr, bound stdout and kill on timeout.
+/// Secrets never appear in error text or command-line arguments.
+fn run_bounded(mut command: Command, max_bytes: usize, timeout: Duration) -> Result<Vec<u8>, ()> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+    let reader = child.stdout.take().ok_or(())?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = reader
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ())
+            .and(if bytes.len() > max_bytes {
+                Err(())
+            } else {
+                Ok(bytes)
+            });
+        let _ = sender.send(result);
+    });
+    let received = receiver.recv_timeout(timeout);
+    if !matches!(received, Ok(Ok(_))) {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|_| ())?;
+    let _ = worker.join();
+    if !status.success() {
         return Err(());
     }
-    if !item
-        .get("category")
-        .and_then(Value::as_str)
-        .is_some_and(|v| v.eq_ignore_ascii_case("LOGIN"))
-    {
-        return Err(());
-    }
-    let expected_origin = origin(&profile.login_url)?;
-    let approved = item
-        .get("urls")
-        .and_then(Value::as_array)
-        .ok_or(())?
-        .iter()
-        .filter_map(|u| u.get("href").and_then(Value::as_str))
-        .any(|u| origin(u).ok().as_ref() == Some(&expected_origin));
-    if !approved {
-        return Err(());
-    }
-    Ok(Login {
-        username: field_value(item, "USERNAME", "username")?,
-        password: field_value(item, "PASSWORD", "password")?,
-    })
+    received.map_err(|_| ())?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn profile() -> Profile {
-        Profile {
-            vault: "vault-id".to_string(),
-            item: "item-id".to_string(),
-            item_ref: Some("Demo Login".to_string()),
-            login_url: "https://example.com/login".to_string(),
+
+    fn meta(id: &str, title: &str) -> ItemMeta {
+        ItemMeta {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            vault_id: "vault-a".into(),
         }
     }
-    fn sample_item() -> Value {
-        json!({
-            "id": "item-id",
-            "vault": {"id": "vault-id", "name": "Demo"},
-            "category": "LOGIN",
-            "urls": [{"href": "https://example.com/login"}],
-            "fields": [
-                {"purpose": "USERNAME", "value": "alice@example.com"},
-                {"purpose": "PASSWORD", "value": "fake-test-password"}
-            ]
-        })
-    }
+
     #[test]
-    fn resolves_only_approved_login() {
-        let login = parse_login(&sample_item(), &profile()).unwrap();
-        assert_eq!(login.username, "alice@example.com");
-        assert_eq!(login.password, "fake-test-password");
-    }
-    #[test]
-    fn rejects_cross_origin() {
-        let r = ResolveRequest {
-            profile_name: "demo".into(),
-            item_ref: None,
-            url: Some("https://evil.example/login".into()),
-        };
-        assert!(authorize(&profile(), &r).is_err());
-    }
-    #[test]
-    fn rejects_missing_request_origin() {
-        let r = ResolveRequest {
-            profile_name: "demo".into(),
-            item_ref: Some("Demo Login".into()),
-            url: None,
-        };
-        assert!(authorize(&profile(), &r).is_err());
-    }
-    #[test]
-    fn accepts_explicit_same_origin() {
-        let r = ResolveRequest {
-            profile_name: "demo".into(),
-            item_ref: Some("Demo Login".into()),
-            url: Some("https://example.com/sign-in?next=dashboard".into()),
-        };
-        assert!(authorize(&profile(), &r).is_ok());
-    }
-    #[test]
-    fn rejects_credentials_at_similar_looking_hosts() {
+    fn exact_https_origins_only() {
+        assert_eq!(
+            https_origin("https://EXAMPLE.com/login").unwrap(),
+            "https://example.com"
+        );
         for url in [
-            "https://example.com.evil.tld/login",
-            "https://evil.example.com/login",
-            "https://example.com:8443/login",
-            "https://user@example.com/login",
+            "http://example.com",
+            "https://evil.example.com",
+            "https://example.com.evil.tld",
+            "https://u:p@example.com/login",
         ] {
-            let r = ResolveRequest {
-                profile_name: "demo".into(),
-                item_ref: None,
-                url: Some(url.into()),
-            };
-            assert!(
-                authorize(&profile(), &r).is_err(),
-                "unexpected URL acceptance"
-            );
+            assert_ne!(https_origin(url).ok().as_deref(), Some("https://example.com"));
         }
     }
+
     #[test]
-    fn rejects_unapproved_item_ref() {
-        let r = ResolveRequest {
-            profile_name: "demo".into(),
-            item_ref: Some("other-item".into()),
-            url: None,
-        };
-        assert!(authorize(&profile(), &r).is_err());
+    fn select_requires_disambiguation() {
+        let items = [meta("a", "Team"), meta("b", "Team")];
+        assert!(select_login(&items, None).is_err());
+        assert!(select_login(&items, Some("Team")).is_err());
+        assert_eq!(select_login(&items, Some("op:b")).unwrap().id, "b");
+        assert_eq!(select_login(&items, Some("a")).unwrap().id, "a");
     }
+
     #[test]
-    fn rejects_unmatched_1password_url() {
-        let mut item = sample_item();
-        item["urls"][0]["href"] = json!("https://other.example/login");
-        assert!(parse_login(&item, &profile()).is_err());
+    fn only_metadata_at_matching_origin() {
+        let data = json!([
+            {"id":"a","title":"ok","vault":{"id":"vault-a"},"urls":[{"href":"https://example.com/login"}]},
+            {"id":"b","title":"evil","vault":{"id":"vault-b"},"urls":[{"href":"https://example.com.evil.tld/login"}]},
+            {"id":"c","title":"sub","vault":{"id":"vault-c"},"urls":[{"href":"https://login.example.com"}]}
+        ]);
+        let found = matching_logins(&data, "https://example.com").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "a");
     }
+
     #[test]
-    fn rejects_wrong_vault() {
-        let mut item = sample_item();
-        item["vault"]["id"] = json!("another-vault");
-        item["vault"]["name"] = json!("another-name");
-        assert!(parse_login(&item, &profile()).is_err());
-    }
-    #[test]
-    fn rejects_non_https() {
-        assert!(origin("http://example.com/login").is_err());
-        assert!(origin("https://u:p@example.com/login").is_err());
-    }
-    #[test]
-    fn rejects_non_login_item() {
-        let mut item = sample_item();
-        item["category"] = json!("CREDIT_CARD");
-        assert!(parse_login(&item, &profile()).is_err());
+    fn item_metadata_reverified_at_secret_resolution() {
+        let meta = meta("a", "Test");
+        let valid = json!({
+            "id":"a", "vault":{"id":"vault-a"}, "category":"LOGIN",
+            "urls":[{"href":"https://example.com/login"}],
+            "fields":[
+                {"purpose":"USERNAME","value":"alice@example.com"},
+                {"purpose":"PASSWORD","value":"fake-secret"}
+            ]
+        });
+        assert!(verified_login(&valid, &meta, "https://example.com").is_ok());
+        let mut changed = valid.clone();
+        changed["urls"][0]["href"] = json!("https://elsewhere.example/login");
+        assert!(verified_login(&changed, &meta, "https://example.com").is_err());
+        changed = valid.clone();
+        changed["vault"]["id"] = json!("other-vault");
+        assert!(verified_login(&changed, &meta, "https://example.com").is_err());
+        changed = valid.clone();
+        changed["category"] = json!("CREDIT_CARD");
+        assert!(verified_login(&changed, &meta, "https://example.com").is_err());
     }
 }
