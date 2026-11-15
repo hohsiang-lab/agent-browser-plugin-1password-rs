@@ -74,6 +74,19 @@ fi
 
 SSH/non-interactive `op` sessions may not share desktop application authorization. If it fails, configure a dedicated read-only 1Password Service Account locally and ensure its token reaches **the Mac Agent Browser process**, not Hermes on Monster. Do not paste the token into chat, CI or shell arguments.
 
+### Diagnose a headless Service Account without revealing credentials
+
+After adding `OP_SERVICE_ACCOUNT_TOKEN` to the **Mac** process environment, run this local, read-only diagnostic from a **fresh** Mac shell or SSH session (use a dedicated staging test login):
+
+```sh
+python3 scripts/diagnose-credential-provider.py \
+  --url https://hoh-i-carebridge.work/login
+```
+
+It prints only stage PASS/FAIL and the **count** of Login Items whose saved website matches the exact HTTPS origin. It never prints the token, login title, username, password, item ID, Vault name, TOTP, or raw JSON. The diagnostic isolates `op` authentication to the Service Account, reads the selected test Login item to validate its schema, and invokes the local Rust Plugin without submitting the browser form. If more than one item matches, rerun with `--item "EXACT-TEST-ITEM-ID"` locally; do not share item IDs. If the diagnostic passes but an **already-running** Agent Browser MCP still fails, reconnect/restart that MCP transport so it inherits the new `OP_SERVICE_ACCOUNT_TOKEN` environment; creating a new browser session alone does not restart the MCP process.
+
+**Security:** a token in `~/.zshenv` is inherited by every Zsh child process (including arbitrary tools in the SSH account). Prefer a dedicated read-only Automation Vault and, longer term, a dedicated MCP launch wrapper with macOS Keychain. The tool deliberately suppresses `op` stderr and parses secrets only in local process memory; only run trusted, reviewed code.
+
 ## Connect to Agent Browser
 
 Add this plugin entry to the existing `~/.agent-browser/config.json` on the Mac (merge; don't overwrite other settings):
