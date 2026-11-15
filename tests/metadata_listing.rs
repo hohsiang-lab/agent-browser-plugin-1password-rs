@@ -103,9 +103,14 @@ fn item_list_covers_all_categories_but_never_fields_or_secrets() {
     assert_eq!(response["data"]["total"], 3);
     let items = response["data"]["items"].as_array().unwrap();
     assert!(items.iter().any(|item| item["category"] == "LOGIN"));
-    assert!(items.iter().any(|item| item["category"] == "API_CREDENTIAL"));
+    assert!(items
+        .iter()
+        .any(|item| item["category"] == "API_CREDENTIAL"));
     let login = items.iter().find(|item| item["id"] == "login1").unwrap();
-    assert_eq!(login["websiteOrigins"], json!(["https://hoh-i-carebridge.work"]));
+    assert_eq!(
+        login["websiteOrigins"],
+        json!(["https://hoh-i-carebridge.work"])
+    );
     for denied in ["NEVER-LEAK", "notesPlain", "password", "fields", "username"] {
         assert!(!response.to_string().contains(denied), "leaked: {denied}");
     }
