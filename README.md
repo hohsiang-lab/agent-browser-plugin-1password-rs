@@ -2,7 +2,7 @@
 
 An unofficial open-source Rust [Agent Browser](https://agent-browser.dev/plugins) **credential.read** provider using the 1Password CLI (`op`). It follows the **Hermes `browser_vault` 1Password login-backend** pattern: discover Login-item metadata, match an exact saved website origin, then read **one** selected Login item on demand.
 
-> Status: tested with mock `op` data and CI only. It is not affiliated with 1Password, Agent Browser, or Hermes. **Do not use a personal or production vault until reviewed on your own device.**
+> Status: tested with mock `op` data and CI; Mac M1 has also completed a staging 1Password credential login through the connected browser, while separate TOTP remains unsupported upstream. This plugin is not affiliated with 1Password, Agent Browser, or Hermes. **Do not use a personal or production vault until reviewed on your own device.**
 
 ## How it works
 
@@ -98,7 +98,7 @@ Add this plugin entry to the existing `~/.agent-browser/config.json` on the Mac 
       "name": "1password",
       "command": "/Users/YOU/.local/bin/agent-browser-plugin-1password",
       "args": [],
-      "capabilities": ["credential.read"]
+      "capabilities": ["credential.read", "vault.list", "vault.items.list"]
     }
   ]
 }
@@ -130,7 +130,46 @@ agent-browser auth login example \
   --url https://example.com/login
 ```
 
-**There is no interactive account picker in `credential.read`.** The provider deliberately refuses ambiguous matches rather than guessing. Use your trusted local 1Password CLI/UI to determine the Item ID; do not paste Vault listings or secrets into chat.
+**There is no interactive account picker in `credential.read`.** The provider deliberately refuses ambiguous matches rather than guessing. Use `vault.items.list` (locally or through a trusted MCP client with the debug profile) to discover the exact Item ID, then pass that ID to `--item`. Do not share Vault metadata with untrusted clients.
+
+### AI-visible Vault and Item inventory (metadata only)
+
+The plugin also provides two **read-only custom capabilities** compatible with upstream `agent-browser plugin run`:
+
+- `vault.list` — list Vault IDs, names and types visible to the configured 1Password Service Account.
+- `vault.items.list` — list Item IDs, titles, categories, Vault names/IDs, and normalized HTTPS website **origins**, across all accessible Vaults or with filters. This does not call `op item get`.
+
+These are **not** part of the standard `credential.read` interface, and do **not** automatically become individually named MCP tools. Agent Browser's `agent_browser_plugin_run` MCP tool (debug profile) can invoke them. The connected Mac tunnel is currently configured with `core,state` only, so its tool profile must be changed and the service reconnected before they can be invoked from ChatGPT.
+
+Register both capabilities on the existing plugin entry (preserve other config fields):
+
+```json
+{
+  "name": "1password",
+  "command": "/Users/YOU/.local/bin/agent-browser-plugin-1password",
+  "args": [],
+  "capabilities": ["credential.read", "vault.list", "vault.items.list"]
+}
+```
+
+From a trusted local shell:
+
+```sh
+agent-browser plugin run 1password vault.list --payload '{"limit":50,"offset":0}'
+agent-browser plugin run 1password vault.items.list --payload '{"limit":50,"offset":0}'
+agent-browser plugin run 1password vault.items.list --payload '{"category":"login","origin":"https://hoh-i-carebridge.work","limit":50}'
+agent-browser plugin run 1password vault.items.list --payload '{"vaultId":"VAULT_ID","query":"manager","limit":50}'
+```
+
+Accepted filters: `vaultId`, `category`, `query` (title substring), `origin` (exact HTTPS origin), `limit` (1–200), and `offset` (0–100000). Vault listing supports `query`, `limit`, and `offset`. Each response reports `total` and `nextOffset` for pagination. Omit all filters to enumerate all metadata that the 1Password CLI account can list.
+
+The returned data is reconstructed from an explicit field allowlist: **no raw JSON, usernames, passwords, notes, credit card data, TOTP, or API key values** are returned. Website URLs are normalized to HTTPS origins and stripped of paths, queries, and fragments. Titles and Vault names are metadata and can still be sensitive; only enable inventory tools for trusted AI clients, and keep the Service Account scoped to Vaults you intend to expose. Listing does **not** grant new Vault permissions or let an AI retrieve secret field values.
+
+**Warning about logging:** the developer-facing `plugin run` tool returns metadata to the AI/MCP caller, so avoid granting this capability to clients that should not see Vault and Item titles. Never add generic `op item get`, secret field read, or card read as an exposed plugin action.
+
+### Upstream TOTP boundary
+
+Agent Browser 0.43.0 accepts the optional `otp` field in `ResolvedCredential`, but its `auth login` handler does not use it for a post-password second factor. A successful `auth login` tool result is not proof that the destination Dashboard is authenticated; inspect the browser URL and page. A staged challenge proposal exists at [upstream PR #1638](https://github.com/vercel-labs/agent-browser/pull/1638), but is not merged. Do not implement an incompatible custom TOTP protocol here.
 
 ### Optional local policy
 
