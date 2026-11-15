@@ -127,7 +127,7 @@ Set `AB_OP_ALLOWED_ORIGINS` on the Mac plugin's environment to a comma-separated
 export AB_OP_ALLOWED_ORIGINS="https://example.com,https://staging.example.org"
 ```
 
-When unset, any Login URL allowed by the connected 1Password account is eligible, subject to exact origin matching. A dedicated automation Vault/Service Account is strongly recommended. An explicitly empty or malformed allowlist is rejected. Use `AB_OP_BINARY` if `op` isn't on the process `PATH`.
+When unset, any Login URL allowed by the connected 1Password account is eligible, subject to exact origin matching. A dedicated automation Vault/Service Account is strongly recommended. An explicitly empty or malformed allowlist is rejected. For background-launched Agent Browser processes on macOS, the plugin checks `/opt/homebrew/bin/op` and `/usr/local/bin/op` before falling back to `PATH`; `AB_OP_BINARY` explicitly overrides this detection. This avoids relying on the reduced `PATH` often inherited from `launchd`, but does not guarantee an authenticated 1Password session in that process.
 
 ### Authentication modes
 
