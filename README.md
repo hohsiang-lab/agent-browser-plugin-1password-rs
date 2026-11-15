@@ -48,6 +48,32 @@ install -m 700 target/release/agent-browser-plugin-1password "$HOME/.local/bin/"
 
 CI also builds a macOS ARM64 binary (`aarch64-apple-darwin`). Download only from a workflow run of a reviewed commit, and verify provenance. A CI artifact is not a signed release. Install `op` separately.
 
+### Mac M1 install using the pinned GitHub Actions artifact
+
+The repository includes `scripts/install-macos-arm64.sh`. It requires an authenticated GitHub CLI (`gh`), takes the **successful workflow run ID and that run's exact 40-character head commit SHA**, verifies both, downloads the ARM64 artifact, installs to `~/.local/bin`, and checks `plugin.manifest` without reading any Vault or token:
+
+```sh
+git clone https://github.com/hohsiang-lab/agent-browser-plugin-1password-rs.git
+cd agent-browser-plugin-1password-rs
+git checkout feat/rust-op-credential-provider
+# Replace placeholders with IDs from the successful GitHub Actions run:
+sh scripts/install-macos-arm64.sh <successful-run-id> <exact-full-commit-sha>
+```
+
+If `gh` isn't installed: `brew install gh` followed by `gh auth login`. The installer does not configure Agent Browser, create a 1Password session, or read Login items. The workflow artifacts expire; for long-lived use, build from reviewed source or publish a signed release.
+
+**Check CLI authorization without revealing data**:
+
+```sh
+if op item list --categories Login --format json >/dev/null 2>&1; then
+  echo "1Password CLI authentication: PASS"
+else
+  echo "1Password CLI authentication unavailable in this shell"
+fi
+```
+
+SSH/non-interactive `op` sessions may not share desktop application authorization. If it fails, configure a dedicated read-only 1Password Service Account locally and ensure its token reaches **the Mac Agent Browser process**, not Hermes on Monster. Do not paste the token into chat, CI or shell arguments.
+
 ## Connect to Agent Browser
 
 Add this plugin entry to the existing `~/.agent-browser/config.json` on the Mac (merge; don't overwrite other settings):
