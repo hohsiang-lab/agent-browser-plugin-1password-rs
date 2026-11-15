@@ -412,6 +412,40 @@ mod tests {
         assert!(authorize(&profile(), &r).is_err());
     }
     #[test]
+    fn rejects_missing_request_origin() {
+        let r = ResolveRequest {
+            profile_name: "demo".into(),
+            item_ref: Some("Demo Login".into()),
+            url: None,
+        };
+        assert!(authorize(&profile(), &r).is_err());
+    }
+    #[test]
+    fn accepts_explicit_same_origin() {
+        let r = ResolveRequest {
+            profile_name: "demo".into(),
+            item_ref: Some("Demo Login".into()),
+            url: Some("https://example.com/sign-in?next=dashboard".into()),
+        };
+        assert!(authorize(&profile(), &r).is_ok());
+    }
+    #[test]
+    fn rejects_credentials_at_similar_looking_hosts() {
+        for url in [
+            "https://example.com.evil.tld/login",
+            "https://evil.example.com/login",
+            "https://example.com:8443/login",
+            "https://user@example.com/login",
+        ] {
+            let r = ResolveRequest {
+                profile_name: "demo".into(),
+                item_ref: None,
+                url: Some(url.into()),
+            };
+            assert!(authorize(&profile(), &r).is_err(), "unexpected URL acceptance");
+        }
+    }
+    #[test]
     fn rejects_unapproved_item_ref() {
         let r = ResolveRequest {
             profile_name: "demo".into(),
