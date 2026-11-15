@@ -32,13 +32,17 @@ if ! command -v gh >/dev/null 2>&1; then
   echo "GitHub CLI (gh) required; install with: brew install gh" >&2
   exit 2
 fi
-if ! gh auth status >/dev/null 2>&1; then
-  echo "GitHub CLI is not authenticated; use gh auth login" >&2
+# Check the actual API operation instead of "gh auth status": a valid
+# GITHUB_TOKEN can coexist with an expired, stored default credential, and
+# "gh auth status" may return nonzero despite API access working.
+if ! RUN_SHA="$(gh run view "$RUN_ID" --repo "$REPO" --json headSha --jq '.headSha')"; then
+  echo "Cannot access GitHub workflow run. Check GITHUB_TOKEN or gh CLI login." >&2
   exit 2
 fi
-
-RUN_SHA="$(gh run view "$RUN_ID" --repo "$REPO" --json headSha --jq '.headSha')"
-RESULT="$(gh run view "$RUN_ID" --repo "$REPO" --json conclusion --jq '.conclusion')"
+if ! RESULT="$(gh run view "$RUN_ID" --repo "$REPO" --json conclusion --jq '.conclusion')"; then
+  echo "Cannot query GitHub workflow conclusion." >&2
+  exit 2
+fi
 if [ "$RUN_SHA" != "$EXPECTED_SHA" ] || [ "$RESULT" != "success" ]; then
   echo "Refusing to install: run SHA mismatch or workflow not successful" >&2
   exit 1
