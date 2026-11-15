@@ -18,6 +18,7 @@ const PROTOCOL: &str = "agent-browser.plugin.v1";
 const MAX_INPUT_BYTES: u64 = 65_536;
 const MAX_OP_OUTPUT_BYTES: usize = 1_048_576;
 const OP_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(target_os = "macos")]
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Deserialize)]
@@ -202,7 +203,7 @@ fn run_bounded(mut command: Command, max_bytes: usize, timeout: Duration) -> Res
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = command.spawn().map_err(|_| ())?;
-    let mut reader = child.stdout.take().ok_or(())?;
+    let reader = child.stdout.take().ok_or(())?;
     let (tx, rx) = mpsc::sync_channel(1);
     let reader_thread = thread::spawn(move || {
         let mut output = Vec::new();
@@ -210,7 +211,7 @@ fn run_bounded(mut command: Command, max_bytes: usize, timeout: Duration) -> Res
             .take(max_bytes as u64 + 1)
             .read_to_end(&mut output)
             .map_err(|_| ())
-            .and_then(|_| {
+            .and({
                 if output.len() > max_bytes {
                     Err(())
                 } else {
