@@ -22,7 +22,7 @@ Hermes sr-worker (Monster) --SSH/Tailscale--> agent-browser MCP (Mac)
 ```
 
 * `plugin.manifest` works without a token.
-* `credential.resolve` selects a **fixed** Vault ID and Item ID based on `profileName`, checks `itemRef` and the HTTPS origin, invokes `op`, verifies the returned Item/Vault/Login/website metadata, then responds with `username`, `password`, and `url`.
+* `credential.resolve` selects a **fixed** Vault ID and Item ID based on `profileName`, requires an explicit HTTPS login origin in `request.url`, checks `itemRef`, invokes `op`, verifies the returned Item/Vault/Login/website metadata, then responds with `username`, `password`, and `url`.
 * 1Password Service Account Token goes only into the `op` process **environment**, not its CLI arguments, an Agent Browser config, or a Git repository.
 * In the official protocol, the **plugin response itself contains the login credential**. Agent Browser consumes it locally; do not print or forward raw protocol messages through an AI tool or logging proxy.
 * This version does **not** support OTP, passkeys, or credit cards. It does not auto-submit payment forms.
@@ -114,21 +114,22 @@ Run from a trusted local Mac terminal once token permissions and profile mapping
 ```sh
 agent-browser auth login staging-example \
   --credential-provider 1password \
-  --item "Staging Example"
+  --item "Staging Example" \
+  --url https://example.com/login
 ```
 
-The login request uses a profile name and fixed alias; no token or password is supplied to the AI agent or process command arguments. For an existing browser login page, Agent Browser supports `--no-navigate --url https://example.com/login`, which checks the active page's origin.
+The login request uses a profile name, fixed alias, and **explicit expected login URL**; no token or password is supplied to the AI agent or process command arguments. The provider **fails closed when the request does not include `url`**, including when a caller relies only on a stored auth profile. For an existing browser login page, Agent Browser supports `--no-navigate --url https://example.com/login`, which checks the active page's origin. The plugin compares the URL's origin (scheme/host/effective port), rather than a permissive substring match.
 
 ## Hermes MCP nuance
 
 Existing `sr-worker` starts Agent Browser via Tailscale SSH and has verified `open`/`get_title`. The upstream **MCP `agent_browser_auth_login` arguments currently do not expose the CLI `--credential-provider` and `--item` switches**. This Rust plugin alone does not add an MCP login tool. To make Hermes perform automated vault-backed login, first add those arguments upstream (or create a narrowly scoped local wrapper that does not expose `op` itself), then include the safe tool in `sr-worker`'s MCP allowlist.
 
-Do **not** give Hermes an unrestricted `op` shell tool or generic plugin runner. The fixed mapping, approved origin, read-only vault, and disabled parallel browser calls should remain in place.
+Do **not** give Hermes an unrestricted `op` shell tool or generic plugin runner. The fixed mapping, **explicit request origin**, approved item website, read-only vault, and disabled parallel browser calls should remain in place.
 
 ## Security properties and limitations
 
 - No arbitrary vault/item discovery. No 1Password CLI interactive sign-in. No non-HTTPS origins. Item ID, Vault ID and Login category must match the static configuration; the 1Password item itself must contain a matching website origin.
-- Config file is owner-readable only (`chmod 600` on Unix). Errors are generic and never echo 1Password CLI output, secrets, or CLI arguments.
+- Config file is owner-readable only (`chmod 600` on Unix). Errors are generic and never echo 1Password CLI output, secrets, or CLI arguments. The plugin enforces bounded output and wall-clock timeouts for `op` and macOS Keychain commands.
 - No OTP retrieval, payment authorization, or card-number handling.
 - The Rust child `op` process receives the Service Account Token in its environment; privileged processes on the Mac may still inspect it. Restrict Mac shell/SSH access and run under a dedicated OS user if possible.
 - Never run `agent-browser plugin run` to print credential responses. `credential.read` is designed for `auth login` only.
