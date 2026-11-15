@@ -238,7 +238,11 @@ fn optional_local_origin_allowlist() {
 
 #[test]
 fn rejects_oversized_cli_output() {
-    let result = invoke(resolve(Some("https://example.com/login"), None), "oversized_list", None);
+    let result = invoke(
+        resolve(Some("https://example.com/login"), None),
+        "oversized_list",
+        None,
+    );
     assert_eq!(result["success"], false);
     assert!(result.get("credential").is_none());
 }
