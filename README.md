@@ -21,7 +21,7 @@ Rust provider
 Agent Browser receives username/password/[otp] and fills the page
 ```
 
-The provider exposes no secret-search or item-list tool to the model. The 1Password CLI produces all metadata locally. The plugin returns credential values **only to Agent Browser's local `credential.resolve` protocol**, which itself contains the password. Do not expose raw plugin stdout, `op`, or `credential.resolve` as generic MCP tools.
+The provider exposes **no AI-facing secret-value read, raw `op` access, or generic credential resolution**. Its separate, explicitly registered `vault.list` and `vault.items.list` capabilities intentionally expose **metadata only** (see below). Login credential values travel **only through Agent Browser's local `credential.resolve` protocol**, which itself contains the password. Never expose raw plugin stdout, arbitrary `op item get`, or `credential.resolve` as a generic MCP tool.
 
 ### Why there is no Vault/Item config
 
