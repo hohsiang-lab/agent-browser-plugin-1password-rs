@@ -388,17 +388,12 @@ fn run_bounded(mut command: Command, max_bytes: usize, timeout: Duration) -> Res
     let (sender, receiver) = mpsc::sync_channel(1);
     let worker = thread::spawn(move || {
         let mut bytes = Vec::new();
-        let result = reader
-            .take(max_bytes as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ())
-            .and_then(|_| {
-                if bytes.len() > max_bytes {
-                    Err(())
-                } else {
-                    Ok(bytes)
-                }
-            });
+        let read_result = reader.take(max_bytes as u64 + 1).read_to_end(&mut bytes);
+        let result = if read_result.is_err() || bytes.len() > max_bytes {
+            Err(())
+        } else {
+            Ok(bytes)
+        };
         let _ = sender.send(result);
     });
     let received = receiver.recv_timeout(timeout);
