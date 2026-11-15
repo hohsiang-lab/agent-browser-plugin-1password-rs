@@ -9,11 +9,16 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use url::Url;
 
 const PROTOCOL: &str = "agent-browser.plugin.v1";
 const MAX_INPUT_BYTES: u64 = 65_536;
 const MAX_OP_OUTPUT_BYTES: usize = 1_048_576;
+const OP_TIMEOUT: Duration = Duration::from_secs(15);
+const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Deserialize)]
 struct Envelope {
@@ -175,10 +180,11 @@ fn authorize(profile: &Profile, request: &ResolveRequest) -> Result<(), ()> {
         return Err(());
     }
     let approved_origin = origin(&profile.login_url)?;
-    if let Some(ref requested) = request.url {
-        if origin(requested)? != approved_origin {
-            return Err(());
-        }
+    // Fail closed when the caller does not provide its intended login origin.
+    // A profile name alone must not authorize secret retrieval.
+    let requested_url = request.url.as_deref().ok_or(())?;
+    if origin(requested_url)? != approved_origin {
+        return Err(());
     }
     if let Some(ref item_ref) = request.item_ref {
         if item_ref != &profile.item && Some(item_ref) != profile.item_ref.as_ref() {
@@ -186,6 +192,37 @@ fn authorize(profile: &Profile, request: &ResolveRequest) -> Result<(), ()> {
         }
     }
     Ok(())
+}
+
+/// Run a local credential backend without shell expansion, with a strict
+/// output cap and wall-clock timeout. Never expose subprocess stderr.
+fn run_bounded(mut command: Command, max_bytes: usize, timeout: Duration) -> Result<Vec<u8>, ()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| ())?;
+    let mut reader = child.stdout.take().ok_or(())?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader_thread = thread::spawn(move || {
+        let mut output = Vec::new();
+        let answer = reader
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut output)
+            .map_err(|_| ())
+            .and_then(|_| if output.len() > max_bytes { Err(()) } else { Ok(output) });
+        let _ = tx.send(answer);
+    });
+    let received = rx.recv_timeout(timeout);
+    if !matches!(received, Ok(Ok(_))) {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|_| ())?;
+    let _ = reader_thread.join();
+    if !status.success() {
+        return Err(());
+    }
+    received.map_err(|_| ())?
 }
 
 /// Token never appears in argv/config/errors.
@@ -200,23 +237,12 @@ fn acquire_service_token(keychain: Option<&Keychain>) -> Result<String, ()> {
         if kc.service.is_empty() || kc.account.is_empty() {
             return Err(());
         }
-        let result = Command::new("/usr/bin/security")
-            .args([
-                "find-generic-password",
-                "-s",
-                &kc.service,
-                "-a",
-                &kc.account,
-                "-w",
-            ])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|_| ())?;
-        if !result.status.success() || result.stdout.len() > 8192 {
-            return Err(());
-        }
-        let token = String::from_utf8(result.stdout).map_err(|_| ())?;
+        let mut command = Command::new("/usr/bin/security");
+        command.args([
+            "find-generic-password", "-s", &kc.service, "-a", &kc.account, "-w",
+        ]);
+        let output = run_bounded(command, 8192, KEYCHAIN_TIMEOUT)?;
+        let token = String::from_utf8(output).map_err(|_| ())?;
         let token = token.trim().to_owned();
         if !token.is_empty() {
             return Ok(token);
@@ -235,19 +261,10 @@ fn run_op(profile: &Profile, token: &str) -> Result<Value, ()> {
         return Err(());
     }
     let mut command = Command::new(op_binary);
-    command
-        .args([
-            "item",
-            "get",
-            &profile.item,
-            "--vault",
-            &profile.vault,
-            "--format",
-            "json",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    command.args([
+        "item", "get", &profile.item, "--vault", &profile.vault,
+        "--format", "json",
+    ]);
 
     // Do not propagate unrelated secrets from MCP host environment.
     command.env_clear();
@@ -269,11 +286,8 @@ fn run_op(profile: &Profile, token: &str) -> Result<Value, ()> {
         .env("OP_SERVICE_ACCOUNT_TOKEN", token)
         .env("OP_LOAD_DESKTOP_APP_SETTINGS", "false")
         .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false");
-    let output = command.output().map_err(|_| ())?;
-    if !output.status.success() || output.stdout.len() > MAX_OP_OUTPUT_BYTES {
-        return Err(());
-    }
-    serde_json::from_slice(&output.stdout).map_err(|_| ())
+    let output = run_bounded(command, MAX_OP_OUTPUT_BYTES, OP_TIMEOUT)?;
+    serde_json::from_slice(&output).map_err(|_| ())
 }
 
 fn field_value(item: &Value, purpose: &str, label: &str) -> Result<String, ()> {
