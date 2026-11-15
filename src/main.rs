@@ -202,7 +202,12 @@ fn acquire_service_token(keychain: Option<&Keychain>) -> Result<String, ()> {
         }
         let result = Command::new("/usr/bin/security")
             .args([
-                "find-generic-password", "-s", &kc.service, "-a", &kc.account, "-w",
+                "find-generic-password",
+                "-s",
+                &kc.service,
+                "-a",
+                &kc.account,
+                "-w",
             ])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -232,7 +237,13 @@ fn run_op(profile: &Profile, token: &str) -> Result<Value, ()> {
     let mut command = Command::new(op_binary);
     command
         .args([
-            "item", "get", &profile.item, "--vault", &profile.vault, "--format", "json",
+            "item",
+            "get",
+            &profile.item,
+            "--vault",
+            &profile.vault,
+            "--format",
+            "json",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -241,8 +252,14 @@ fn run_op(profile: &Profile, token: &str) -> Result<Value, ()> {
     // Do not propagate unrelated secrets from MCP host environment.
     command.env_clear();
     for name in [
-        "PATH", "HOME", "TMPDIR", "LANG", "SSL_CERT_FILE",
-        "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "LANG",
+        "SSL_CERT_FILE",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
     ] {
         if let Some(value) = env::var_os(name) {
             command.env(name, value);
@@ -263,15 +280,23 @@ fn field_value(item: &Value, purpose: &str, label: &str) -> Result<String, ()> {
     let fields = item.get("fields").and_then(Value::as_array).ok_or(())?;
     let by_purpose: Vec<&str> = fields
         .iter()
-        .filter(|f| f.get("purpose").and_then(Value::as_str).is_some_and(|p| p.eq_ignore_ascii_case(purpose)))
+        .filter(|f| {
+            f.get("purpose")
+                .and_then(Value::as_str)
+                .is_some_and(|p| p.eq_ignore_ascii_case(purpose))
+        })
         .filter_map(|f| f.get("value").and_then(Value::as_str))
         .collect();
     let matches = if by_purpose.is_empty() {
         fields
             .iter()
             .filter(|f| {
-                f.get("id").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case(label))
-                    || f.get("label").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case(label))
+                f.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s.eq_ignore_ascii_case(label))
+                    || f.get("label")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s.eq_ignore_ascii_case(label))
             })
             .filter_map(|f| f.get("value").and_then(Value::as_str))
             .collect::<Vec<_>>()
@@ -294,7 +319,11 @@ fn parse_login(item: &Value, profile: &Profile) -> Result<Login, ()> {
     {
         return Err(());
     }
-    if !item.get("category").and_then(Value::as_str).is_some_and(|v| v.eq_ignore_ascii_case("LOGIN")) {
+    if !item
+        .get("category")
+        .and_then(Value::as_str)
+        .is_some_and(|v| v.eq_ignore_ascii_case("LOGIN"))
+    {
         return Err(());
     }
     let expected_origin = origin(&profile.login_url)?;
@@ -348,7 +377,7 @@ mod tests {
         let r = ResolveRequest {
             profile_name: "demo".into(),
             item_ref: None,
-            url: Some("https://evil.example/login".into())
+            url: Some("https://evil.example/login".into()),
         };
         assert!(authorize(&profile(), &r).is_err());
     }
@@ -357,7 +386,7 @@ mod tests {
         let r = ResolveRequest {
             profile_name: "demo".into(),
             item_ref: Some("other-item".into()),
-            url: None
+            url: None,
         };
         assert!(authorize(&profile(), &r).is_err());
     }
