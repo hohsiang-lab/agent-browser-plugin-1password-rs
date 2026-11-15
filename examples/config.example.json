@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "staging-example": {
+      "vault": "YOUR_DEDICATED_VAULT_ID",
+      "item": "YOUR_LOGIN_ITEM_ID",
+      "item_ref": "Staging Example",
+      "login_url": "https://example.com/login"
+    }
+  },
+  "keychain": {
+    "service": "agent-browser-1password",
+    "account": "service-account"
+  }
+}

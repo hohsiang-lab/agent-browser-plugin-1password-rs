@@ -1,0 +1,9 @@
+/target/
+*.log
+.DS_Store
+/config.json
+/*token*
+*.pem
+*.key
+.env
+.env.*
