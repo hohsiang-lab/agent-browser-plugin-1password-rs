@@ -1,0 +1,13 @@
+[package]
+name = "agent-browser-plugin-1password"
+version = "0.1.0"
+edition = "2021"
+description = "An Agent Browser credential.read plugin backed by the 1Password CLI"
+license = "MIT"
+repository = "https://github.com/hohsiang-lab/agent-browser-plugin-1password-rs"
+readme = "README.md"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"

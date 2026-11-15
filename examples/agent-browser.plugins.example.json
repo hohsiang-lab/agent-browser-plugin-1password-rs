@@ -1,0 +1,14 @@
+{
+  "plugins": [
+    {
+      "name": "1password",
+      "command": "/Users/YOU/.local/bin/agent-browser-plugin-1password",
+      "args": [],
+      "capabilities": [
+        "credential.read",
+        "vault.list",
+        "vault.items.list"
+      ]
+    }
+  ]
+}
