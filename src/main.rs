@@ -4,6 +4,8 @@
 //! an exact saved website origin, then resolve one item's credentials on demand.
 //! No vault/item mapping or 1Password token is stored by this plugin.
 
+mod metadata;
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::env;
@@ -83,10 +85,16 @@ fn execute() -> Result<Value, ()> {
             "success": true,
             "manifest": {
                 "name": "1password",
-                "capabilities": ["credential.read"],
+                "capabilities": ["credential.read", "vault.list", "vault.items.list"],
                 "description": "1Password CLI logins selected by exact browser origin"
             }
         }));
+    }
+    if envelope.request_type == "vault.list" && envelope.capability == "vault.list" {
+        return metadata::list_vaults(&envelope.request);
+    }
+    if envelope.request_type == "vault.items.list" && envelope.capability == "vault.items.list" {
+        return metadata::list_items(&envelope.request);
     }
     if envelope.request_type != "credential.resolve" || envelope.capability != "credential.read" {
         return Err(());
