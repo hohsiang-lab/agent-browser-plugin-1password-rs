@@ -317,12 +317,26 @@ fn op_json(args: &[&str], timeout: Duration) -> Result<Value, ()> {
     serde_json::from_slice(&output).map_err(|_| ())
 }
 
-fn op_output(args: &[&str], timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, ()> {
-    let binary = env::var_os("AB_OP_BINARY").unwrap_or_else(|| "op".into());
-    if binary.is_empty() {
-        return Err(());
+/// Resolve the local CLI without assuming a launchd/service PATH contains Homebrew.
+/// Explicit AB_OP_BINARY always wins. No shell or environment interpolation is used.
+fn locate_op_binary() -> Result<std::ffi::OsString, ()> {
+    if let Some(binary) = env::var_os("AB_OP_BINARY") {
+        if binary.is_empty() {
+            return Err(());
+        }
+        return Ok(binary);
     }
-    let mut command = Command::new(binary);
+    #[cfg(target_os = "macos")]
+    for path in ["/opt/homebrew/bin/op", "/usr/local/bin/op"] {
+        if std::path::Path::new(path).is_file() {
+            return Ok(path.into());
+        }
+    }
+    Ok("op".into())
+}
+
+fn op_output(args: &[&str], timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, ()> {
+    let mut command = Command::new(locate_op_binary()?);
     command.args(args);
     configure_op_environment(&mut command);
     run_bounded(command, max_bytes, timeout)
