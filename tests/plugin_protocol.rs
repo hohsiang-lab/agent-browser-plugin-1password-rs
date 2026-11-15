@@ -144,7 +144,11 @@ fn auto_selects_only_matching_login_and_returns_optional_otp() {
 
 #[test]
 fn no_otp_is_valid_login() {
-    let output = invoke(resolve(Some("https://example.com/login"), None), "no_otp", None);
+    let output = invoke(
+        resolve(Some("https://example.com/login"), None),
+        "no_otp",
+        None,
+    );
     assert_eq!(output["success"], true);
     assert!(output["credential"].get("otp").is_none());
 }
