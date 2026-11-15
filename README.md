@@ -60,7 +60,7 @@ git checkout feat/rust-op-credential-provider
 sh scripts/install-macos-arm64.sh <successful-run-id> <exact-full-commit-sha>
 ```
 
-If `gh` isn't installed: `brew install gh` followed by `gh auth login`. The installer does not configure Agent Browser, create a 1Password session, or read Login items. The workflow artifacts expire; for long-lived use, build from reviewed source or publish a signed release.
+If `gh` isn't installed, use `brew install gh`. The installer checks real GitHub workflow API access rather than `gh auth status`, because a valid `GITHUB_TOKEN` environment variable may coexist with an expired saved default credential. **Do not run `gh auth login` just because `gh auth status` complains about an unused saved credential**; test the requested run with `gh run view <run-id> --repo hohsiang-lab/agent-browser-plugin-1password-rs --json headSha,conclusion`. Only if that API operation fails, fix GitHub CLI authentication or an existing environment token locally. The installer does not configure Agent Browser, create a 1Password session, or read Login items. The workflow artifacts expire; for long-lived use, build from reviewed source or publish a signed release.
 
 **Check CLI authorization without revealing data**:
 
