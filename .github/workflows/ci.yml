@@ -19,6 +19,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: sh -n scripts/install-macos-arm64.sh
+      - run: python3 -m py_compile scripts/diagnose-credential-provider.py
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
