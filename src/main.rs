@@ -442,7 +442,10 @@ mod tests {
                 item_ref: None,
                 url: Some(url.into()),
             };
-            assert!(authorize(&profile(), &r).is_err(), "unexpected URL acceptance");
+            assert!(
+                authorize(&profile(), &r).is_err(),
+                "unexpected URL acceptance"
+            );
         }
     }
     #[test]
