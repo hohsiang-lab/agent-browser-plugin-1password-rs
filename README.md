@@ -2,7 +2,7 @@
 
 An unofficial open-source Rust [Agent Browser](https://agent-browser.dev/plugins) **credential.read** provider using the 1Password CLI (`op`). It follows the **Hermes `browser_vault` 1Password login-backend** pattern: discover Login-item metadata, match an exact saved website origin, then read **one** selected Login item on demand.
 
-> Status: tested with mock `op` data and CI; Mac M1 has also completed a staging 1Password credential login through the connected browser, while separate TOTP remains unsupported upstream. This plugin is not affiliated with 1Password, Agent Browser, or Hermes. **Do not use a personal or production vault until reviewed on your own device.**
+> Status: mock-`op` CI on Ubuntu/macOS and 2026-11-16 real Mac M1 + connected ChatGPT MCP staging **QA Manager 10 Dashboard login** verified. Separate staged TOTP is not supported by Agent Browser 0.43.0. This project is not affiliated with 1Password, Agent Browser, or Hermes. **Do not use a personal or production vault until reviewed on your own device.**
 
 ## How it works
 
@@ -139,7 +139,7 @@ The plugin also provides two **read-only custom capabilities** compatible with u
 - `vault.list` — list Vault IDs, names and types visible to the configured 1Password Service Account.
 - `vault.items.list` — list Item IDs, titles, categories, Vault names/IDs, and normalized HTTPS website **origins**, across all accessible Vaults or with filters. This does not call `op item get`.
 
-These are **not** part of the standard `credential.read` interface, and do **not** automatically become individually named MCP tools. Agent Browser's `agent_browser_plugin_run` MCP tool (debug profile) can invoke them. The connected Mac tunnel is currently configured with `core,state` only, so its tool profile must be changed and the service reconnected before they can be invoked from ChatGPT.
+These are **not** part of the standard `credential.read` interface, and do **not** automatically become individually named MCP tools. Agent Browser's `agent_browser_plugin_run` MCP tool (debug profile) can invoke them. On 2026-11-16, the Mac tunnel was verified with `core,state,debug`; the connected ChatGPT MCP now exposes `agent_browser_plugin_run`. Calls to `vault.list` and `vault.items.list` **passed on real host data** (1 accessible Vault, 83 Items, 43 matching staging Login Items at verification time). These are metadata counts only, not credentials.
 
 Register both capabilities on the existing plugin entry (preserve other config fields):
 
@@ -195,7 +195,7 @@ The upstream `ResolvedCredential` schema includes an optional `otp` field. If a 
 
 ## Hermes `sr-worker` on Monster
 
-Hermes currently reaches the Mac's Agent Browser MCP over Tailscale SSH. That transport can remain unchanged. **However, the currently exposed `agent_browser_auth_login` MCP tool does not pass through the CLI `--credential-provider`, `--item` and `--url` options.** This provider alone does not enable Hermes to call it. Extend those upstream MCP parameters or build a narrowly scoped audited wrapper before enabling any real login. Don't give Hermes arbitrary access to the `op` CLI.
+Hermes currently reaches the Mac's Agent Browser MCP over Tailscale SSH. That transport can remain unchanged. **Native Hermes `sr-worker` MCP parameter/allowlist parity remains unverified and is tracked in issue #2.** The advertised typed `agent_browser_auth_login` arguments still do not list `credentialProvider`, `item` and `url`, but the **connected ChatGPT Agent Browser MCP** accepted shared `extraArgs` for `--credential-provider 1password --item <exact ID> --url <staging URL>`. On 2026-11-16 a real QA Manager 10 account successfully reached the authenticated staging `/dashboard` after a `loggedIn: true` response. This proves the connected ChatGPT path, **not** native Hermes `sr-worker` parity. Do not expose arbitrary 1Password item reads or credential output in MCP. Don't give Hermes arbitrary access to the `op` CLI.
 
 Hermes' native `browser_vault` works with browsers it owns; it does not automatically own a remote Agent Browser MCP session. This Rust project is for Agent Browser's independent credential plugin interface.
 
