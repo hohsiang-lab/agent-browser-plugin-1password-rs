@@ -22,3 +22,16 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
+      - name: Build macOS Apple Silicon binary
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+      - name: Upload macOS Apple Silicon binary
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-browser-plugin-1password-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/agent-browser-plugin-1password
+          if-no-files-found: error
+          retention-days: 7
