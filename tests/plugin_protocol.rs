@@ -35,6 +35,10 @@ fn fake_op() -> &'static str {
     r##"#!/bin/sh
 [ "$OP_SERVICE_ACCOUNT_TOKEN" = "FAKE_TEST_TOKEN" ] || exit 1
 if [ "$1" = "item" ] && [ "$2" = "list" ]; then
+  if [ "$MOCK_CASE" = "oversized_list" ]; then
+    head -c 1100000 /dev/zero | tr '\\000' 'X'
+    exit 0
+  fi
   case "$MOCK_CASE" in
     no_match)
       printf '%s\n' '[{"id":"evil","title":"Evil","vault":{"id":"v-evil"},"urls":[{"href":"https://example.com.evil.tld"}]}]'
@@ -230,4 +234,11 @@ fn optional_local_origin_allowlist() {
         Some(""),
     );
     assert_eq!(empty["success"], false);
+}
+
+#[test]
+fn rejects_oversized_cli_output() {
+    let result = invoke(resolve(Some("https://example.com/login"), None), "oversized_list", None);
+    assert_eq!(result["success"], false);
+    assert!(result.get("credential").is_none());
 }
