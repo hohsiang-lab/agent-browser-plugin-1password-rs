@@ -210,7 +210,13 @@ fn run_bounded(mut command: Command, max_bytes: usize, timeout: Duration) -> Res
             .take(max_bytes as u64 + 1)
             .read_to_end(&mut output)
             .map_err(|_| ())
-            .and_then(|_| if output.len() > max_bytes { Err(()) } else { Ok(output) });
+            .and_then(|_| {
+                if output.len() > max_bytes {
+                    Err(())
+                } else {
+                    Ok(output)
+                }
+            });
         let _ = tx.send(answer);
     });
     let received = rx.recv_timeout(timeout);
@@ -239,7 +245,12 @@ fn acquire_service_token(keychain: Option<&Keychain>) -> Result<String, ()> {
         }
         let mut command = Command::new("/usr/bin/security");
         command.args([
-            "find-generic-password", "-s", &kc.service, "-a", &kc.account, "-w",
+            "find-generic-password",
+            "-s",
+            &kc.service,
+            "-a",
+            &kc.account,
+            "-w",
         ]);
         let output = run_bounded(command, 8192, KEYCHAIN_TIMEOUT)?;
         let token = String::from_utf8(output).map_err(|_| ())?;
@@ -262,8 +273,13 @@ fn run_op(profile: &Profile, token: &str) -> Result<Value, ()> {
     }
     let mut command = Command::new(op_binary);
     command.args([
-        "item", "get", &profile.item, "--vault", &profile.vault,
-        "--format", "json",
+        "item",
+        "get",
+        &profile.item,
+        "--vault",
+        &profile.vault,
+        "--format",
+        "json",
     ]);
 
     // Do not propagate unrelated secrets from MCP host environment.
