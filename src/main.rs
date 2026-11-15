@@ -435,7 +435,10 @@ mod tests {
             "https://example.com.evil.tld",
             "https://u:p@example.com/login",
         ] {
-            assert_ne!(https_origin(url).ok().as_deref(), Some("https://example.com"));
+            assert_ne!(
+                https_origin(url).ok().as_deref(),
+                Some("https://example.com")
+            );
         }
     }
 
