@@ -46,6 +46,8 @@ install -m 700 target/release/agent-browser-plugin-1password "$HOME/.local/bin/a
 
 For macOS paths without `~/.local/bin`, create the directory first. Avoid using a public CI job with real secret values.
 
+For a Mac M1 without Rust installed, the GitHub Actions `CI` workflow also builds an `aarch64-apple-darwin` binary and uploads it as a short-lived workflow artifact. Download only from the GitHub Actions run for the reviewed commit, verify the artifact corresponds to that commit, and install the executable locally. The artifact does **not** install the 1Password CLI or configure any service-account token. Avoid treating a CI artifact as a signed release.
+
 ## Create a private local mapping (never commit it)
 
 ```sh
