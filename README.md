@@ -87,6 +87,19 @@ It prints only stage PASS/FAIL and the **count** of Login Items whose saved webs
 
 **Security:** a token in `~/.zshenv` is inherited by every Zsh child process (including arbitrary tools in the SSH account). Prefer a dedicated read-only Automation Vault and, longer term, a dedicated MCP launch wrapper with macOS Keychain. The tool deliberately suppresses `op` stderr and parses secrets only in local process memory; only run trusted, reviewed code.
 
+### Continue an existing second-page TOTP challenge (local only)
+
+`auth login ... --credential-provider 1password --item "..."` fills the username/password form but does not itself finish a separate `/totp` challenge. A local operator can continue the **already-open** browser session without exposing the OTP in chat, shell history, process arguments, files, or normal command output:
+
+```sh
+zsh -c 'python3 scripts/complete-totp-local.py \\
+  --url https://hoh-i-carebridge.work/login \\
+  --item "HO-2576 Run3020 actual invited Staff" \\
+  --session op-ho2576-staging-nov16'
+```
+
+The script verifies the chosen 1Password Login Item's exact website origin, retrieves a fresh six-digit code with `op item get --otp`, checks the current browser page is on the expected `https://.../totp` origin, and sends a one-time DOM submission via `agent-browser eval --stdin`. The TOTP is not included in command-line arguments or output. It does not modify or persist any browser auth profiles. **Only attempt the code once per run**; after it says PASS, verify the page with `get url`/snapshot. A submission PASS does not by itself prove login success. If the item has no TOTP field, stop and complete MFA manually; do not turn off MFA.
+
 ## Connect to Agent Browser
 
 Add this plugin entry to the existing `~/.agent-browser/config.json` on the Mac (merge; don't overwrite other settings):
